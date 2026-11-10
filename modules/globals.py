@@ -91,4 +91,4 @@ capture_resolution: tuple = (640, 480)
 # --- END OF FILE globals.py ---
 
 import threading
-dml_lock = threading.Lock()
+dml_lock = threading.RLock()

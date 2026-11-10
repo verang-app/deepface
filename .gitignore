@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.py[cod]
 *$py.class
 *.pyc
@@ -8,6 +8,8 @@ __pycache__/
 *.backup
 tf_env/
 *.png
+*.jpg
+*.jpeg
 *.mp4
 *.mkv
 
@@ -18,14 +20,14 @@ venv/
 env/
 workflow/
 gfpgan/
-models/inswapper_128.onnx
-models/GFPGANv1.4.pth
+models/
 *.onnx
-models/DMDNet.pth
+*.pth
 faceswap/
 .vscode/
 switch_states.json
-/models
 install.bat
 /.claude
-*.bat
+*.exe
+*.whl
+*.tmp

@@ -59,6 +59,8 @@ def get_face_analyser() -> Any:
                 )
                 det_size = _current_det_size()
                 analyser.prepare(ctx_id=0, det_size=det_size)
+                if hasattr(analyser, 'det_model') and analyser.det_model is not None:
+                    analyser.det_model.det_thresh = 0.25
                 _optimize_det_model(analyser, providers, det_size)
                 # Publish only after prepare()/optimize() complete, so a
                 # lock-free reader can never observe a half-built analyser
@@ -134,6 +136,21 @@ def _is_dml() -> bool:
     return any("DmlExecutionProvider" in p for p in modules.globals.execution_providers)
 
 
+def _detect_faces_adaptive(det_model, frame: Frame, max_num: int = 0, metric: str = "default"):
+    """Run face detection with adaptive fallback for challenging webcam lighting.
+    
+    InsightFace default det_thresh is 0.50, which fails completely on typical laptop
+    webcams in room lighting (scores 0.10-0.40). This tries standard threshold first,
+    then automatically falls back to more sensitive levels so faces are reliably found.
+    """
+    for thresh in (0.30, 0.15, 0.08):
+        det_model.det_thresh = thresh
+        bboxes, kpss = det_model.detect(frame, max_num=max_num, metric=metric)
+        if bboxes is not None and bboxes.shape[0] > 0:
+            return bboxes, kpss
+    return bboxes, kpss
+
+
 def _analyse_faces(frame: Frame) -> list:
     """Run face detection, then recognition (and optionally landmark).
 
@@ -143,8 +160,12 @@ def _analyse_faces(frame: Frame) -> list:
     """
     fa = get_face_analyser()
 
-    bboxes, kpss = fa.det_model.detect(frame, max_num=0, metric="default")
-    if bboxes.shape[0] == 0:
+    if _is_dml():
+        with modules.globals.dml_lock:
+            bboxes, kpss = _detect_faces_adaptive(fa.det_model, frame, max_num=0, metric="default")
+    else:
+        bboxes, kpss = _detect_faces_adaptive(fa.det_model, frame, max_num=0, metric="default")
+    if bboxes is None or bboxes.shape[0] == 0:
         return []
 
     need_landmark = _needs_landmark()
@@ -174,9 +195,11 @@ def get_one_face(frame: Frame, faces: Any = None) -> Any:
                 faces = _analyse_faces(frame)
         else:
             faces = _analyse_faces(frame)
+    if not faces:
+        return None
     try:
-        return min(faces, key=lambda x: x.bbox[0])
-    except ValueError:
+        return max(faces, key=lambda x: getattr(x, 'det_score', 0.0))
+    except (ValueError, TypeError):
         return None
 
 
@@ -198,10 +221,14 @@ def detect_one_face_fast(frame: Frame) -> Any:
     """
     from insightface.app.common import Face
     fa = get_face_analyser()
-    bboxes, kpss = fa.det_model.detect(frame, max_num=0, metric='default')
-    if bboxes.shape[0] == 0:
+    if _is_dml():
+        with modules.globals.dml_lock:
+            bboxes, kpss = _detect_faces_adaptive(fa.det_model, frame, max_num=0, metric='default')
+    else:
+        bboxes, kpss = _detect_faces_adaptive(fa.det_model, frame, max_num=0, metric='default')
+    if bboxes is None or bboxes.shape[0] == 0:
         return None
-    idx = int(bboxes[:, 0].argmin())
+    idx = int(bboxes[:, 4].argmax())
     return Face(bbox=bboxes[idx, :4], kps=kpss[idx], det_score=bboxes[idx, 4])
 
 
@@ -209,8 +236,12 @@ def detect_many_faces_fast(frame: Frame) -> Any:
     """Detection-only multi-face — skips landmark and recognition."""
     from insightface.app.common import Face
     fa = get_face_analyser()
-    bboxes, kpss = fa.det_model.detect(frame, max_num=0, metric='default')
-    if bboxes.shape[0] == 0:
+    if _is_dml():
+        with modules.globals.dml_lock:
+            bboxes, kpss = _detect_faces_adaptive(fa.det_model, frame, max_num=0, metric='default')
+    else:
+        bboxes, kpss = _detect_faces_adaptive(fa.det_model, frame, max_num=0, metric='default')
+    if bboxes is None or bboxes.shape[0] == 0:
         return None
     return [Face(bbox=bboxes[i, :4], kps=kpss[i], det_score=bboxes[i, 4])
             for i in range(bboxes.shape[0])]

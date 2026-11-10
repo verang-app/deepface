@@ -1185,9 +1185,11 @@ class _ProcessingWorker(QThread):
         frame_count = 0
         fps = 0.0
         det_count = 0
+        face_miss_count = 0
         cached_target_face = None
         cached_many_faces = None
         det_interval = max(1, round(self._fps * 0.08))
+        logged_swap_active = False
 
         while not self._stop.is_set():
             try:
@@ -1202,18 +1204,10 @@ class _ProcessingWorker(QThread):
             if not modules.globals.map_faces:
                 if (
                     modules.globals.source_path
-                    and modules.globals.source_path != last_source_path
+                    and (source_image is None or modules.globals.source_path != last_source_path)
                 ):
                     source_frame = imread_unicode(modules.globals.source_path)
                     if source_frame is None:
-                        # Clear the cached path along with the image. It keeps
-                        # a source that is only transiently unreadable (still
-                        # being written, on a volume that just went away) from
-                        # being given up on, and it keeps a bad pick from
-                        # sticking: with the path cached, A -> unreadable B -> A
-                        # never reloaded A, so swapping stayed off. Retrying
-                        # every frame is cheap; the message is reported once per
-                        # path so it cannot flood the status line.
                         source_image = None
                         last_source_path = None
                         if reported_source_error != modules.globals.source_path:
@@ -1225,14 +1219,34 @@ class _ProcessingWorker(QThread):
                         last_source_path = modules.globals.source_path
                         reported_source_error = None
                         source_image = get_one_face(source_frame)
+                        if source_image is None:
+                            print(f"[DLC.LIVE] WARNING: No face detected in source image '{modules.globals.source_path}'! Select a clear portrait photo.", flush=True)
+                            update_status("No face detected in source image!")
+                        else:
+                            print(f"[DLC.LIVE] Source face loaded successfully from '{modules.globals.source_path}'.", flush=True)
+                            update_status("Source face ready.")
 
                 det_count += 1
-                if det_count % det_interval == 0:
+                if det_count == 1 or det_count % det_interval == 0:
                     if modules.globals.many_faces:
+                        new_many = detect_many_faces_fast(temp_frame)
+                        if new_many:
+                            cached_many_faces = new_many
+                            face_miss_count = 0
+                        else:
+                            face_miss_count += 1
+                            if face_miss_count > 6:
+                                cached_many_faces = None
                         cached_target_face = None
-                        cached_many_faces = detect_many_faces_fast(temp_frame)
                     else:
-                        cached_target_face = detect_one_face_fast(temp_frame)
+                        new_target = detect_one_face_fast(temp_frame)
+                        if new_target is not None:
+                            cached_target_face = new_target
+                            face_miss_count = 0
+                        else:
+                            face_miss_count += 1
+                            if face_miss_count > 6:
+                                cached_target_face = None
                         cached_many_faces = None
 
                 cached_faces = None
@@ -1241,9 +1255,6 @@ class _ProcessingWorker(QThread):
                 elif cached_target_face is not None:
                     cached_faces = [cached_target_face]
 
-                # Fast detection skips the 2d106 landmark model, but the mouth
-                # mask needs it. Attach landmarks on demand (computed once per
-                # detection cycle — the helper no-ops if already present).
                 if modules.globals.mouth_mask and cached_faces:
                     ensure_landmarks(temp_frame, cached_faces)
 
@@ -1276,6 +1287,9 @@ class _ProcessingWorker(QThread):
                             temp_frame = fp.swap_face(
                                 source_image, cached_target_face, temp_frame
                             )
+                            if not logged_swap_active and source_image is not None:
+                                print("[DLC.LIVE] Swapping ACTIVE: Model face is now replacing your face in real-time.", flush=True)
+                                logged_swap_active = True
                             if (
                                 hasattr(cached_target_face, "bbox")
                                 and cached_target_face.bbox is not None
@@ -1305,11 +1319,22 @@ class _ProcessingWorker(QThread):
                 prev_time = current_time
 
             if modules.globals.show_fps:
-                cv2.putText(
-                    temp_frame, f"FPS: {fps:.1f}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2,
-                )
-
+                status_txt = f"FPS: {fps:.1f}"
+                if source_image is not None and cached_target_face is not None:
+                    status_txt += " | FACE SWAPPED (ACTIVE)"
+                    cv2.putText(
+                        temp_frame, status_txt, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
+                    )
+                else:
+                    if source_image is None:
+                        status_txt += " | NO SOURCE FACE (Select face in main window)"
+                    elif cached_target_face is None:
+                        status_txt += " | SEARCHING FOR FACE..."
+                    cv2.putText(
+                        temp_frame, status_txt, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2,
+                    )
             try:
                 self._pq.put_nowait(temp_frame)
             except queue.Full:
